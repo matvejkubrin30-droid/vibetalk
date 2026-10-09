@@ -1,0 +1,317 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>VibeTalk</title>
+<script>
+const PEER_SRC=['https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js','https://cdnjs.cloudflare.com/ajax/libs/peerjs/1.5.4/peerjs.min.js'];
+function loadFallback(i){if(i>=PEER_SRC.length||window.Peer)return;const s=document.createElement('script');s.src=PEER_SRC[i];s.onerror=()=>loadFallback(i+1);document.head.appendChild(s);}
+</script>
+<script src="https://cdn.jsdelivr.net/npm/peerjs@1.5.4/dist/peerjs.min.js" onerror="loadFallback(0)"></script>
+<style>
+:root{--bg:#15141b;--panel:#1d1c26;--line:#2d2b3a;--text:#ece9f5;--dim:#8e8aa3;--acc:#7c8cff;--live:#ff5d73;--ok:#5fd3a0}
+*{box-sizing:border-box;margin:0}
+html,body{height:100%}
+body{background:var(--bg);color:var(--text);font:15px/1.45 "Segoe UI",system-ui,sans-serif}
+button,input{font:inherit;color:inherit}
+button{cursor:pointer;border:0;border-radius:10px;padding:9px 14px;background:var(--line);transition:background .15s}
+button:hover{background:#3a3850}
+button.acc{background:var(--acc);color:#10112a;font-weight:600}
+button.acc:hover{background:#98a4ff}
+button.on{background:var(--live);color:#fff}
+button:focus-visible,input:focus-visible{outline:2px solid var(--acc);outline-offset:2px}
+input{background:var(--bg);border:1px solid var(--line);border-radius:10px;padding:10px 12px;width:100%}
+#login{height:100%;display:grid;place-items:center;padding:20px}
+#login form{width:min(380px,100%);display:grid;gap:12px}
+#login h1{font-size:30px;letter-spacing:-.5px}
+#login p{color:var(--dim);font-size:13px}
+#app{display:none;height:100%;grid-template-columns:1fr 320px;grid-template-rows:auto 1fr}
+header{grid-column:1/3;display:flex;gap:10px;align-items:center;flex-wrap:wrap;padding:10px 14px;border-bottom:1px solid var(--line);background:var(--panel)}
+header b{font-size:17px;margin-right:4px}
+#status{font-size:13px;color:var(--dim);margin-right:auto}
+#members{display:flex;gap:6px;flex-wrap:wrap;width:100%}
+.chip{font-size:12px;padding:3px 10px;border-radius:99px;background:var(--line)}
+.chip.me{background:var(--acc);color:#10112a}
+#stage{padding:14px;display:grid;gap:12px;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));align-content:start;overflow:auto}
+.tile{position:relative;background:#000;border-radius:12px;overflow:hidden;border:1px solid var(--line)}
+.tile video{width:100%;display:block;max-height:75vh;background:#000}
+.tile span{position:absolute;left:10px;top:10px;background:rgba(0,0,0,.65);padding:2px 10px;border-radius:99px;font-size:12px}
+#empty{color:var(--dim);padding:40px 10px;text-align:center;grid-column:1/-1}
+#chat{border-left:1px solid var(--line);background:var(--panel);display:flex;flex-direction:column;min-height:0}
+#log{flex:1;overflow:auto;padding:12px;display:flex;flex-direction:column;gap:8px}
+.m{word-break:break-word}.m small{color:var(--dim);margin-left:6px;font-size:11px}.m b{color:var(--acc)}
+.m.sys{color:var(--dim);font-size:13px;font-style:italic}
+#send{display:flex;gap:6px;padding:10px;border-top:1px solid var(--line)}
+@media(max-width:800px){#app{grid-template-columns:1fr;grid-template-rows:auto auto 300px}header{grid-column:1}#chat{border-left:0;border-top:1px solid var(--line)}}
+</style>
+</head>
+<body>
+
+<div id="login">
+  <form id="loginForm">
+    <h1>VibeTalk</h1>
+    <p>Придумай код комнаты. Все, кто введут такой же код, окажутся в одной комнате: чат, голос и показ экрана.</p>
+    <input id="name" placeholder="Твой ник" maxlength="20" required>
+    <input id="room" placeholder="Код комнаты, например: друзья-2026" maxlength="40" required>
+    <button class="acc" type="submit">Войти</button>
+  </form>
+</div>
+
+<div id="app">
+  <header>
+    <b>VibeTalk</b>
+    <span id="status">Подключаемся…</span>
+    <button id="micBtn">Микрофон вкл</button>
+    <button id="screenBtn">Показать экран</button>
+    <button id="linkBtn">Скопировать ссылку</button>
+    <div id="members"></div>
+  </header>
+  <main id="stage"><div id="empty">Пока никто не показывает экран. Нажми «Показать экран», чтобы включить демку.</div></main>
+  <aside id="chat">
+    <div id="log"></div>
+    <form id="send"><input id="msg" placeholder="Сообщение…" autocomplete="off"><button class="acc">Отпр.</button></form>
+  </aside>
+</div>
+<div id="audios" hidden></div>
+
+<script>
+const $ = id => document.getElementById(id);
+const PREFIX = 'vibetalk-v1-';
+let me, myName, roomCode, REG_ID, main, regPeer = null;
+let localStream, screenStream = null, micOn = true, hasMic = true;
+const conns = {}, names = {}, audioCalls = {}, screenCalls = {}, outScreenCalls = {};
+
+// ---------- вход ----------
+const saved = JSON.parse(localStorage.getItem('vibetalk') || '{}');
+$('name').value = saved.name || '';
+$('room').value = decodeURIComponent(location.hash.slice(1)) || saved.room || '';
+
+$('loginForm').onsubmit = async e => {
+  e.preventDefault();
+  myName = $('name').value.trim();
+  roomCode = $('room').value.trim().toLowerCase().replace(/[^a-zа-я0-9]+/gi, 'x').replace(/^x+|x+$/g, '') || 'room';
+  try { localStorage.setItem('vibetalk', JSON.stringify({ name: myName, room: $('room').value.trim() })); } catch (_) {}
+  REG_ID = PREFIX + encodeURIComponent(roomCode).replace(/%/g, '');
+  $('login').style.display = 'none';
+  $('app').style.display = 'grid';
+  try { location.hash = encodeURIComponent($('room').value.trim()); } catch (_) {}
+  if (!window.Peer) {
+    setStatus('Не загрузилась библиотека связи (PeerJS). Проверь интернет или включи VPN и обнови страницу.');
+    return;
+  }
+  setStatus('Подключаемся…');
+  await getAudio();
+  try { startMain(); } catch (err) { setStatus('Ошибка запуска: ' + err.message); }
+};
+
+async function getAudio() {
+  try {
+    const ask = navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true } });
+    const wait = new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), 8000));
+    localStream = await Promise.race([ask, wait]);
+  } catch (_) {
+    // без микрофона отправляем тишину, чтобы звонки всё равно работали
+    const ctx = new AudioContext();
+    localStream = ctx.createMediaStreamDestination().stream;
+    micOn = false; hasMic = false; $('micBtn').textContent = 'Нет микрофона';
+    sys(window.isSecureContext
+      ? 'Микрофон не разрешён. Разреши его в настройках сайта в браузере и обнови страницу.'
+      : 'Страница открыта не по https, поэтому браузер не даёт микрофон, экран и копирование. Открой её по ссылке с хостинга (https://…), а не файлом.');
+  }
+}
+
+// ---------- основное соединение (у каждого свой случайный id) ----------
+function startMain() {
+  main = new Peer();
+  main.on('open', id => { me = id; names[me] = myName; renderMembers(); joinRoom(); });
+  main.on('connection', c => setupConn(c));
+  main.on('call', call => {
+    if (call.metadata && call.metadata.screen) {
+      call.answer();
+      screenCalls[call.peer] = call;
+      call.on('stream', s => showScreen(call.peer, s));
+      call.on('close', () => hideScreen(call.peer));
+    } else {
+      call.answer(localStream);
+      handleAudio(call);
+    }
+  });
+  main.on('error', err => {
+    if (err.type === 'peer-unavailable') return; // обработаем в joinRoom
+    if (['network', 'server-error', 'socket-error', 'socket-closed'].includes(err.type))
+      setStatus('Нет связи с сервером PeerJS (' + err.type + '). Попробуй другой интернет или VPN.');
+    else setStatus('Ошибка: ' + err.type);
+  });
+  main.on('disconnected', () => { try { main.reconnect(); } catch (_) {} });
+}
+
+// ---------- «регистратор» комнаты: тот, кто первым занял код, раздаёт список людей ----------
+function joinRoom() {
+  const reg = new Peer(REG_ID);
+  reg.on('open', () => {
+    regPeer = reg;
+    const members = {};
+    members[me] = true;
+    setStatus('Комната «' + $('room').value.trim() + '» · ты первый');
+    reg.on('connection', c => {
+      c.on('data', d => {
+        if (d && d.t === 'hello') {
+          members[c.peer] = true;
+          c.send({ t: 'list', list: Object.keys(members).filter(x => x !== c.peer) });
+        }
+      });
+      c.on('close', () => delete members[c.peer]);
+    });
+  });
+  reg.on('error', err => {
+    reg.destroy();
+    if (err.type === 'unavailable-id') connectToRegistry();
+    else setTimeout(joinRoom, 2000 + Math.random() * 2000);
+  });
+}
+
+function connectToRegistry() {
+  const c = main.connect(REG_ID, { reliable: true });
+  let opened = false;
+  c.on('open', () => {
+    opened = true;
+    c.send({ t: 'hello' });
+    setStatus('Комната «' + $('room').value.trim() + '»');
+  });
+  c.on('data', d => { if (d && d.t === 'list') d.list.forEach(connectTo); });
+  // если регистратор ушёл, кто-то из оставшихся занимает его место
+  c.on('close', () => setTimeout(joinRoom, 300 + Math.random() * 2500));
+  setTimeout(() => { if (!opened) { c.close(); joinRoom(); } }, 6000);
+}
+
+// ---------- соединения между людьми ----------
+function connectTo(id) {
+  if (id === me || conns[id]) return;
+  setupConn(main.connect(id, { reliable: true }));
+  handleAudio(main.call(id, localStream));
+}
+
+function setupConn(c) {
+  c.on('open', () => {
+    conns[c.peer] = c;
+    c.send({ t: 'hi', name: myName });
+    if (screenStream) callScreen(c.peer);
+    renderMembers();
+  });
+  c.on('data', d => {
+    if (!d) return;
+    if (d.t === 'hi') { names[c.peer] = d.name; sys(d.name + ' зашёл(ла)'); renderMembers(); }
+    else if (d.t === 'msg') addMsg(names[c.peer] || 'гость', d.text);
+    else if (d.t === 'screenoff') hideScreen(c.peer);
+  });
+  c.on('close', () => {
+    if (names[c.peer]) sys(names[c.peer] + ' вышел(ла)');
+    delete conns[c.peer]; delete names[c.peer];
+    hideScreen(c.peer);
+    const a = $('a-' + c.peer); if (a) a.remove();
+    renderMembers();
+  });
+}
+
+function handleAudio(call) {
+  audioCalls[call.peer] = call;
+  call.on('stream', s => {
+    let a = $('a-' + call.peer);
+    if (!a) { a = document.createElement('audio'); a.id = 'a-' + call.peer; a.autoplay = true; $('audios').appendChild(a); }
+    a.srcObject = s;
+    a.play().catch(() => {});
+  });
+}
+
+// ---------- чат ----------
+$('send').onsubmit = e => {
+  e.preventDefault();
+  const text = $('msg').value.trim();
+  if (!text) return;
+  Object.values(conns).forEach(c => c.send({ t: 'msg', text }));
+  addMsg(myName, text, true);
+  $('msg').value = '';
+};
+function addMsg(who, text, mine) {
+  const d = document.createElement('div'); d.className = 'm';
+  const b = document.createElement('b'); b.textContent = mine ? 'Ты' : who;
+  const s = document.createElement('small'); s.textContent = new Date().toLocaleTimeString('ru', { hour: '2-digit', minute: '2-digit' });
+  d.append(b, s, document.createElement('br'), document.createTextNode(text));
+  push(d);
+}
+function sys(t) { const d = document.createElement('div'); d.className = 'm sys'; d.textContent = t; push(d); }
+function push(d) { const l = $('log'); l.appendChild(d); l.scrollTop = l.scrollHeight; }
+
+// ---------- микрофон ----------
+$('micBtn').onclick = () => {
+  if (!hasMic) return sys('Микрофона нет. ' + (window.isSecureContext ? 'Разреши доступ в настройках браузера и обнови страницу.' : 'Открой страницу по https-ссылке с хостинга, а не файлом.'));
+  micOn = !micOn;
+  localStream.getAudioTracks().forEach(t => t.enabled = micOn);
+  $('micBtn').textContent = micOn ? 'Микрофон вкл' : 'Микрофон выкл';
+  $('micBtn').classList.toggle('on', !micOn);
+};
+
+// ---------- показ экрана ----------
+$('screenBtn').onclick = async () => {
+  if (screenStream) return stopScreen();
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getDisplayMedia)
+    return sys(window.isSecureContext
+      ? 'Телефоны не умеют показывать экран из браузера. С телефона можно смотреть чужой экран, а показывать нужно с компьютера.'
+      : 'Показ экрана работает только по https-ссылке с хостинга и только с компьютера.');
+  try {
+    screenStream = await navigator.mediaDevices.getDisplayMedia({ video: { frameRate: 30 }, audio: true });
+  } catch (_) { return; }
+  screenStream.getVideoTracks()[0].onended = stopScreen;
+  Object.keys(conns).forEach(callScreen);
+  showScreen('me', screenStream, true);
+  $('screenBtn').textContent = 'Остановить показ';
+  $('screenBtn').classList.add('on');
+};
+function callScreen(id) {
+  const call = main.call(id, screenStream, { metadata: { screen: true } });
+  outScreenCalls[id] = call;
+}
+function stopScreen() {
+  if (!screenStream) return;
+  screenStream.getTracks().forEach(t => t.stop());
+  screenStream = null;
+  Object.values(outScreenCalls).forEach(c => c.close());
+  Object.values(conns).forEach(c => c.send({ t: 'screenoff' }));
+  hideScreen('me');
+  $('screenBtn').textContent = 'Показать экран';
+  $('screenBtn').classList.remove('on');
+}
+function showScreen(id, stream, mine) {
+  hideScreen(id);
+  const t = document.createElement('div'); t.className = 'tile'; t.id = 't-' + id;
+  const v = document.createElement('video'); v.srcObject = stream; v.autoplay = true; v.playsInline = true; v.muted = !!mine;
+  v.onclick = () => v.requestFullscreen && v.requestFullscreen();
+  const l = document.createElement('span'); l.textContent = mine ? 'Твой экран' : 'Экран: ' + (names[id] || 'гость');
+  t.append(v, l);
+  $('stage').appendChild(t);
+  $('empty').style.display = 'none';
+}
+function hideScreen(id) {
+  const t = $('t-' + id); if (t) t.remove();
+  if (!document.querySelector('.tile')) $('empty').style.display = '';
+}
+
+// ---------- интерфейс ----------
+function renderMembers() {
+  const m = $('members'); m.textContent = '';
+  const add = (n, me) => { const c = document.createElement('span'); c.className = 'chip' + (me ? ' me' : ''); c.textContent = n + (me ? ' (ты)' : ''); m.appendChild(c); };
+  add(myName, true);
+  Object.keys(conns).forEach(id => add(names[id] || '…'));
+}
+function setStatus(t) { $('status').textContent = t; }
+$('linkBtn').onclick = () => {
+  if (location.protocol === 'file:') return sys('Файл открыт с телефона/компьютера, у него нет ссылки для друзей. Выложи файл на хостинг (Netlify Drop) и дай друзьям тот адрес.');
+  const done = () => { $('linkBtn').textContent = 'Скопировано'; setTimeout(() => $('linkBtn').textContent = 'Скопировать ссылку', 1500); };
+  if (navigator.clipboard && window.isSecureContext) navigator.clipboard.writeText(location.href).then(done, () => prompt('Скопируй ссылку:', location.href));
+  else prompt('Скопируй ссылку:', location.href);
+};
+window.addEventListener('beforeunload', () => { try { main && main.destroy(); regPeer && regPeer.destroy(); } catch (_) {} });
+</script>
+</body>
+</html>
